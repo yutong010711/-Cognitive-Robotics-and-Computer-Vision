@@ -10,11 +10,11 @@ import seaborn as sns
 from tqdm import tqdm
 from itertools import product
 
-# 常量定义
+# Constants
 PROCESSED_ROOT = "/home/mscrobotics2425laptop12/Desktop/vision/rgbd-dataset/processed"
-TARGET_SIZE = (256, 256)  # 降低分辨率节省内存
+TARGET_SIZE = (256, 256)  # Reduce resolution to save memory
 
-# 超参数组合
+# Hyperparameter combinations
 BATCH_SIZES = [64, 32]
 FILTER_SETS = [
     [32, 64, 128],
@@ -24,12 +24,12 @@ OPTIMIZERS = ['adam', 'sgd']
 LRS = [1e-2, 1e-3]
 DROPOUTS = [0.3, 0.7]
 
-# 1. 数据生成器类
+# 1. Data Generator Class
 class RGBDDataGenerator(utils.Sequence):
     def __init__(self, file_paths, labels, batch_size=64, target_size=(256, 256), shuffle=True):
         """
-        :param file_paths: 所有样本的 .npy 文件路径列表
-        :param labels: 对应的标签列表
+        :param file_paths: List of .npy file paths for all samples
+        :param labels: Corresponding label list
         """
         self.file_paths = file_paths
         self.labels = labels
@@ -61,7 +61,7 @@ class RGBDDataGenerator(utils.Sequence):
         if self.shuffle:
             np.random.shuffle(self.indices)
 
-# 2. 构建CNN模型（修改为接受超参数）
+# 2. Build CNN model (parameterized with hyperparameters)
 def build_cnn_model(input_shape=(256, 256, 3), num_classes=10, filters=[32, 64, 128], dropout_rate=0.5):
     model = models.Sequential([
         layers.Conv2D(filters[0], (3, 3), activation='relu', input_shape=input_shape),
@@ -76,14 +76,14 @@ def build_cnn_model(input_shape=(256, 256, 3), num_classes=10, filters=[32, 64, 
     ])
     return model
 
-# 3. 可视化工具（修改为显示超参数结果表格）
+# 3. Visualization tool (displays hyperparameter results table)
 def plot_results_table(results_df):
     plt.figure(figsize=(16, 8))
     ax = plt.subplot(111, frame_on=False)
     ax.xaxis.set_visible(False) 
     ax.yaxis.set_visible(False)
     
-    # 创建表格并显示
+    # Create and display table
     table = pd.plotting.table(ax, results_df, loc='center', cellLoc='center', colWidths=[0.1]*len(results_df.columns))
     table.auto_set_font_size(False)
     table.set_fontsize(10)
@@ -93,19 +93,19 @@ def plot_results_table(results_df):
     plt.savefig('hyperparameter_results.png', bbox_inches='tight', dpi=300)
     plt.show()
 
-# 4. 主流程（修改为超参数测试）
+# 4. Main function (for hyperparameter testing)
 def main():
-    # 配置GPU（可选）
+    # Configure GPU (optional)
     physical_devices = tf.config.list_physical_devices('GPU')
     if physical_devices:
         tf.config.experimental.set_memory_growth(physical_devices[0], True)
     
-    # 加载类别列表（前10类）
+    # Load class list (first 10 categories)
     cnn_path = os.path.join(PROCESSED_ROOT, "cnn")
     categories = sorted([d for d in os.listdir(cnn_path) 
                          if os.path.isdir(os.path.join(cnn_path, d))])[:10]
     
-    # 收集所有样本路径和标签
+    # Collect all sample paths and labels
     all_paths = []
     all_labels = []
 
@@ -117,14 +117,14 @@ def main():
         all_labels.extend([label] * len(file_paths))
         print(f"{category}: {len(file_paths)} samples")
 
-    # 划分训练集和测试集（80/20）
+    # Split into training and test sets (80/20)
     X_train, X_test, y_train, y_test = train_test_split(
         all_paths, all_labels, test_size=0.2, random_state=42, stratify=all_labels)
     
-    # 存储所有结果
+    # Store all results
     results = []
     
-    # 遍历所有超参数组合
+    # Iterate through all hyperparameter combinations
     param_combinations = list(product(BATCH_SIZES, FILTER_SETS, OPTIMIZERS, LRS, DROPOUTS))
     total_combinations = len(param_combinations)
     
@@ -134,15 +134,15 @@ def main():
         print(f"\n=== Testing combination {i}/{total_combinations} ===")
         print(f"Batch: {batch_size}, Filters: {filters}, Optimizer: {optimizer}, LR: {lr}, Dropout: {dropout}")
         
-        # 创建数据生成器
+        # Create data generators
         train_gen = RGBDDataGenerator(X_train, y_train, batch_size=batch_size, target_size=TARGET_SIZE, shuffle=True)
         test_gen = RGBDDataGenerator(X_test, y_test, batch_size=batch_size, target_size=TARGET_SIZE, shuffle=False)
         
-        # 构建模型
+        # Build model
         model = build_cnn_model(input_shape=(*TARGET_SIZE, 3), num_classes=len(categories), 
                                filters=filters, dropout_rate=dropout)
         
-        # 配置优化器
+        # Configure optimizer
         if optimizer == 'adam':
             opt = tf.keras.optimizers.Adam(learning_rate=lr)
         else:
@@ -152,21 +152,21 @@ def main():
                      loss='sparse_categorical_crossentropy',
                      metrics=['accuracy'])
         
-        # 训练模型（减少epochs以加快测试）
+        # Train model (reduced epochs for faster testing)
         history = model.fit(
             train_gen,
             validation_data=test_gen,
-            epochs=20,  # 减少epochs以加快测试
+            epochs=50,
             verbose=0,
             callbacks=[
-                tf.keras.callbacks.EarlyStopping(patience=2, restore_best_weights=True)
+                tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True)
             ]
         )
         
-        # 评估模型
+        # Evaluate model
         val_loss, val_acc = model.evaluate(test_gen, verbose=0)
         
-        # 记录结果
+        # Record results
         results.append({
             'Batch Size': batch_size,
             'Filters': '-'.join(map(str, filters)),
@@ -179,17 +179,17 @@ def main():
         
         print(f"Validation Accuracy: {val_acc:.4f}")
     
-    # 将结果转换为DataFrame并排序
+    # Convert results to DataFrame and sort
     results_df = pd.DataFrame(results)
     results_df = results_df.sort_values('Val Accuracy', ascending=False)
     
-    # 保存结果
+    # Save results
     results_df.to_csv('hyperparameter_results.csv', index=False)
     
-    # 可视化结果
+    # Visualize results
     plot_results_table(results_df)
     
-    # 打印最佳组合
+    # Print best combination
     best_result = results_df.iloc[0]
     print("\n⭐ Best Hyperparameter Combination:")
     print(f"Batch Size: {best_result['Batch Size']}")
