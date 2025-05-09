@@ -1,177 +1,209 @@
 import os
+import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
-import tensorflow as tf
-from tensorflow.keras import layers, models, utils
-from sklearn.model_selection import train_test_split
+from sklearn import svm
 from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 import seaborn as sns
-from tqdm import tqdm
 
-# 常量定义
-PROCESSED_ROOT = "/home/mscrobotics2425laptop12/Desktop/vision/rgbd-dataset/processed"
-BATCH_SIZE = 32
-TARGET_SIZE = (256, 256)  # 降低分辨率节省内存
-LEARNING_RATE = 0.001
-DROPOUT_RATE = 0.7
+# Path configuration
+PROCESSED_PATH = "/home/mscrobotics2425laptop12/Desktop/vision/rgbd-dataset/processed"
+TRADITIONAL_PATH = os.path.join(PROCESSED_PATH, "traditional")
 
-# 1. 数据生成器类
-class RGBDDataGenerator(utils.Sequence):
-    def __init__(self, file_paths, labels, batch_size=32, target_size=(256, 256), shuffle=True):
-        """
-        :param file_paths: 所有样本的 .npy 文件路径列表
-        :param labels: 对应的标签列表
-        """
-        self.file_paths = file_paths
-        self.labels = labels
-        self.batch_size = batch_size
-        self.target_size = target_size
-        self.shuffle = shuffle
-        self.indices = np.arange(len(self.file_paths))
-        if self.shuffle:
-            np.random.shuffle(self.indices)
-
-    def __len__(self):
-        return int(np.ceil(len(self.file_paths) / self.batch_size))
-
-    def __getitem__(self, index):
-        batch_indices = self.indices[index*self.batch_size:(index+1)*self.batch_size]
-        batch_images = []
-        batch_labels = []
-
-        for i in batch_indices:
-            img = np.load(self.file_paths[i])
-            if img.shape[:2] != self.target_size:
-                img = tf.image.resize(img, self.target_size).numpy()
-            batch_images.append(img)
-            batch_labels.append(self.labels[i])
-
-        return np.array(batch_images), np.array(batch_labels)
-
-    def on_epoch_end(self):
-        if self.shuffle:
-            np.random.shuffle(self.indices)
-
-# 2. 构建CNN模型
-def build_cnn_model(input_shape=(256, 256, 3), num_classes=10):
-    model = models.Sequential([
-        layers.Conv2D(32, (3, 3), activation='relu', input_shape=input_shape),
-        layers.MaxPooling2D((2, 2)),
-        layers.Conv2D(64, (3, 3), activation='relu'),
-        layers.MaxPooling2D((2, 2)),
-        layers.Conv2D(128, (3, 3), activation='relu'),
-        layers.GlobalAveragePooling2D(),
-        layers.Dense(128, activation='relu'),
-        layers.Dropout(DROPOUT_RATE),  # 使用指定的dropout率
-        layers.Dense(num_classes, activation='softmax')
-    ])
+# 1. Load and prepare dataset
+def load_dataset(max_samples_per_class=1000, target_size=(256, 256)):
+    categories = [d for d in os.listdir(TRADITIONAL_PATH) 
+                  if os.path.isdir(os.path.join(TRADITIONAL_PATH, d))]
     
-    optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)  # 使用指定的学习率
-    model.compile(optimizer=optimizer,
-                 loss='sparse_categorical_crossentropy',
-                 metrics=['accuracy'])
-    return model
+    # Sort categories alphabetically
+    categories.sort()
 
-# 3. 可视化工具
-def plot_results(history, y_true, y_pred, class_names):
-    plt.figure(figsize=(24, 6))
+    X = []
+    y = []
+    label_to_name = {}
+
+    print("Loading dataset...")
     
-    # 训练曲线 - Accuracy
-    plt.subplot(1, 4, 1)
-    plt.plot(history.history['accuracy'], label='Train Accuracy')
-    plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
-    plt.title('Accuracy Curve')
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy')
-    plt.legend()
+    # Use the first 10 categories
+    for label, category in enumerate(categories[:10]):
+        label_to_name[label] = category
+        category_path = os.path.join(TRADITIONAL_PATH, category)
+        samples = 0
+
+        img_files = os.listdir(category_path)
+        
+        # Limit to first 1000 samples per class
+        img_files = img_files[:max_samples_per_class]
+
+        for img_file in img_files:
+            img_path = os.path.join(category_path, img_file)
+            img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+            if img is not None:
+                img = cv2.resize(img, target_size)
+                X.append(img)
+                y.append(label)
+                samples += 1
+
+        print(f"Loaded {samples} samples from {category}")
+
+    return np.array(X), np.array(y), label_to_name
+
+
+# 2. Feature extraction (SIFT + Bag of Words)
+def extract_features(images, n_clusters=10000):
+    print("\nExtracting SIFT features...")
+    sift = cv2.SIFT_create()
+    descriptors_all = []
     
-    # 训练曲线 - Loss
-    plt.subplot(1, 4, 2)
-    plt.plot(history.history['loss'], label='Train Loss')
-    plt.plot(history.history['val_loss'], label='Validation Loss')
-    plt.title('Loss Curve')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
+    # Extract SIFT features from all images
+    for img in images:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, descriptors = sift.detectAndCompute(gray, None)
+        if descriptors is not None:
+            descriptors_all.append(descriptors)
     
-    # 混淆矩阵
-    plt.subplot(1, 4, 3)
-    cm = confusion_matrix(y_true, y_pred)
-    sns.heatmap(cm, annot=True, fmt='d', 
-               xticklabels=class_names,
-               yticklabels=class_names,
-               cmap='Blues')
-    plt.title('Confusion Matrix')
-    plt.xticks(rotation=45)
+    # Stack all descriptors for K-means clustering
+    descriptors_all = np.vstack(descriptors_all)
+    print(f"Total descriptors: {descriptors_all.shape}")
+
+    # K-means clustering to create visual vocabulary
+    print("Creating visual vocabulary...")
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.1)
+    _, labels, centers = cv2.kmeans(
+        descriptors_all.astype(np.float32), 
+        n_clusters, 
+        None, 
+        criteria, 
+        10, 
+        cv2.KMEANS_RANDOM_CENTERS
+    )
     
-    # 分类报告
-    plt.subplot(1, 4, 4)
-    report = classification_report(y_true, y_pred, 
-                                 target_names=class_names,
-                                 output_dict=True)
-    sns.heatmap(pd.DataFrame(report).iloc[:-1, :].T, 
-               annot=True, cmap='YlGnBu')
-    plt.title('Classification Report')
+    # Create BoW histogram for each image
+    print("Creating BoW histograms...")
+    X_bow = []
+    for img in images:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, descriptors = sift.detectAndCompute(gray, None)
+        hist = np.zeros(n_clusters)
+        
+        if descriptors is not None:
+            distances = np.linalg.norm(
+                descriptors[:, np.newaxis] - centers, 
+                axis=2
+            )
+            nearest_clusters = np.argmin(distances, axis=1)
+            for cluster in nearest_clusters:
+                hist[cluster] += 1
+            hist /= hist.sum()  # Normalize histogram
+        
+        X_bow.append(hist)
+    
+    return np.array(X_bow)
+
+# 3. Classification and evaluation
+def train_and_evaluate(X, y, label_to_name):
+    # Train-test split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    
+    # Standardize features
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+    
+    # Train SVM
+    print("\nTraining SVM classifier...")
+    clf = svm.SVC(kernel='linear', C=1, probability=True)
+    clf.fit(X_train, y_train)
+    
+    # Evaluate performance
+    y_pred = clf.predict(X_test)
+    print("\nClassification Report:")
+    print(classification_report(
+        y_test, 
+        y_pred, 
+        target_names=list(label_to_name.values())
+    ))
+    
+    return clf, X_test, y_test, y_pred
+
+# 4. Visualization
+def visualize_results(X, y, y_pred, label_to_name):
+    plt.figure(figsize=(15, 10))
+    
+    # Dimensionality reduction (PCA + t-SNE)
+    print("\nRunning dimensionality reduction for visualization...")
+    pca = PCA(n_components=50)
+    X_pca = pca.fit_transform(X)
+    tsne = TSNE(n_components=2, random_state=42)
+    X_tsne = tsne.fit_transform(X_pca)
+    
+    # Plot true labels
+    plt.subplot(1, 2, 1)
+    for label in np.unique(y):
+        mask = y == label
+        plt.scatter(
+            X_tsne[mask, 0], X_tsne[mask, 1], 
+            label=label_to_name[label],
+            alpha=0.6
+        )
+    plt.title("True Labels")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Plot predicted labels
+    plt.subplot(1, 2, 2)
+    for label in np.unique(y_pred):
+        mask = y_pred == label
+        plt.scatter(
+            X_tsne[mask, 0], X_tsne[mask, 1], 
+            label=label_to_name.get(label, f"Class {label}"),
+            alpha=0.6
+        )
+    plt.title("Predicted Labels")
     
     plt.tight_layout()
-    plt.savefig('cnn_results.png', bbox_inches='tight', dpi=300)
+    plt.savefig("traditional_cv_results.png", bbox_inches='tight', dpi=300)
+    plt.show()
+    
+    # Confusion matrix
+    plt.figure(figsize=(10, 8))
+    cm = confusion_matrix(y, y_pred)
+    sns.heatmap(
+        cm, 
+        annot=True, 
+        fmt='d', 
+        cmap='Blues',
+        xticklabels=list(label_to_name.values()),
+        yticklabels=list(label_to_name.values())
+    )
+    plt.title("Confusion Matrix")
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig("confusion_matrix.png", dpi=300)
     plt.show()
 
-# 4. 主流程
+# Main entry
 def main():
-    # 配置GPU（可选）
-    physical_devices = tf.config.list_physical_devices('GPU')
-    if physical_devices:
-        tf.config.experimental.set_memory_growth(physical_devices[0], True)
+    # Load dataset (limit per class for demonstration speed)
+    X, y, label_to_name = load_dataset(max_samples_per_class=1000)
     
-    # 加载类别列表（前10类）
-    cnn_path = os.path.join(PROCESSED_ROOT, "cnn")
-    categories = sorted([d for d in os.listdir(cnn_path) 
-                         if os.path.isdir(os.path.join(cnn_path, d))])[:10]
+    # Extract features
+    X_features = extract_features(X, n_clusters=10000)
     
-    # 收集所有样本路径和标签
-    all_paths = []
-    all_labels = []
-
-    for label, category in enumerate(categories):
-        category_path = os.path.join(cnn_path, category)
-        npy_files = sorted([f for f in os.listdir(category_path) if f.endswith('.npy')])[:1000]
-        file_paths = [os.path.join(category_path, f) for f in npy_files]
-        all_paths.extend(file_paths)
-        all_labels.extend([label] * len(file_paths))
-        print(f"{category}: {len(file_paths)} samples")
-
-    # 划分训练集和测试集（80/20）
-    X_train, X_test, y_train, y_test = train_test_split(
-        all_paths, all_labels, test_size=0.2, random_state=42, stratify=all_labels)
-
-    # 创建数据生成器
-    train_gen = RGBDDataGenerator(X_train, y_train, batch_size=BATCH_SIZE, target_size=TARGET_SIZE, shuffle=True)
-    test_gen = RGBDDataGenerator(X_test, y_test, batch_size=BATCH_SIZE, target_size=TARGET_SIZE, shuffle=False)
-
-    # 构建模型
-    model = build_cnn_model(input_shape=(*TARGET_SIZE, 3), num_classes=len(categories))
-    model.summary()
-
-    # 训练模型
-    history = model.fit(
-        train_gen,
-        validation_data=test_gen,
-        epochs=50,
-        callbacks=[
-            tf.keras.callbacks.EarlyStopping(patience=3, restore_best_weights=True),
-            tf.keras.callbacks.ModelCheckpoint('best_model.h5', save_best_only=True)
-        ]
+    # Train and evaluate model
+    clf, X_test, y_test, y_pred = train_and_evaluate(
+        X_features, y, label_to_name
     )
-
-    # 测试并可视化
-    y_pred = model.predict(test_gen).argmax(axis=1)
-    y_true = np.array(y_test[:len(y_pred)])
-
-    print("\n✅ Test Accuracy:", np.mean(y_pred == y_true))
-    plot_results(history, y_true, y_pred, categories)
-
+    
+    # Visualize results
+    visualize_results(X_test, y_test, y_pred, label_to_name)
 
 if __name__ == "__main__":
     main()
